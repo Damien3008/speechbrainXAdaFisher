@@ -45,6 +45,7 @@ from speechbrain.utils.distributed import is_distributed_initialized
 from speechbrain.utils.logger import get_logger
 from speechbrain.utils.optimizers import rm_vector_weight_decay
 from speechbrain.utils.profiling import prepare_profiler
+from speechbrain.optimizers.AdaFisher import AdaFisher
 
 logger = get_logger(__name__)
 DEFAULT_LOG_CONFIG = os.path.dirname(os.path.abspath(__file__))
@@ -1151,8 +1152,20 @@ class Brain:
             if self.remove_vector_weight_decay:
                 all_params = rm_vector_weight_decay(self.modules)
 
-            self.optimizer = self.opt_class(all_params)
 
+            # AdaFisher requires the entire model, not just
+            # the parameters
+            if self.opt_class.func is AdaFisher:
+                # print('============ SB MODULES =============')
+                # for module in self.modules:
+                #     print(self.modules[module])
+                #     # for sub_module in module:
+                #     #     print('\t', sub_module)
+                # print('=====================================')
+                self.optimizer = self.opt_class(self.modules)
+            else:
+                self.optimizer = self.opt_class(all_params)
+            
             self.optimizers_dict = {"opt_class": self.optimizer}
 
             if self.checkpointer is not None:

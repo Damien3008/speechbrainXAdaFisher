@@ -427,7 +427,7 @@ if __name__ == "__main__":
     # Trainer initialization
     asr_brain = ASR(
         modules=hparams["modules"],
-        opt_class=hparams["Adam"],
+        opt_class=hparams["AdaFisher"],
         hparams=hparams,
         run_opts=run_opts,
         checkpointer=hparams["checkpointer"],
