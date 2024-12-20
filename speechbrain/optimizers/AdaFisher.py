@@ -188,8 +188,6 @@ def _extract_patches(x: Tensor, kernel_size: Tuple[int],
     if padding is not None:
         if padding[0] + padding[1] > 0:
             x = pad(x, (padding[1], padding[1], padding[0], padding[0]))
-    print('x.size():', x.size())
-    print('x.ndim:', x.ndim)
     unsqueeze = x.ndim < 4
     if unsqueeze:
         x = x.unsqueeze(1)
@@ -241,7 +239,6 @@ class Compute_H_bar_D:
         Returns:
         - Tensor: The diagonal of the covariance matrix of the activations.
         """
-        # print(type(layer))
         if isinstance(layer, Linear):
             H_bar_D = cls.linear(h, layer)
         elif isinstance(layer, sb_Linear):
@@ -344,14 +341,13 @@ class Compute_H_bar_D:
         Returns:
         - Tensor: The diagonal of the covariance matrix of the activations.
         """
-        print('h.size():', h.size())
-        dim_to_reduce = [d for d in range(h.ndim) if d != 1]
+        dim_to_reduce = [d for d in range(h.ndim) if d not in (1, 2)] if h.ndim == 4 else [d for d in range(h.ndim) if d !=1]
         batch_size, dim_norm = h.shape[0], prod([h.shape[dim] for dim in dim_to_reduce if dim != 0])
-        sum_h = sum(h, dim=dim_to_reduce).unsqueeze(1) / (dim_norm ** 2)
-        h_bar = cat([sum_h, sum_h.new(sum_h.size(0), 1).fill_(1)], 1)
-        print('h_bar.size():', h_bar.size())
-        # print("einsum('ij,ij->j', h_bar, h_bar) / (batch_size ** 2):", einsum('ij,ij->j', h_bar, h_bar) / (batch_size ** 2))
-        return einsum('ij,ij->j', h_bar, h_bar) / (batch_size ** 2)
+        sum_h = sum(h, dim=dim_to_reduce).unsqueeze(-1) / (dim_norm ** 2)
+        h_bar = cat([sum_h, sum_h.new(sum_h.size(0), sum_h.size(1), 1).fill_(1)], -1)  if h.ndim == 4 \
+            else cat([sum_h, sum_h.new(sum_h.size(0), 1).fill_(1)], -1)
+        return einsum('mnp,mnp->np', h_bar, h_bar) / (batch_size ** 2) if h.ndim == 4 \
+            else einsum('ij,ij->j', h_bar, h_bar) / (batch_size ** 2) 
 
 
 class Compute_S_D:
@@ -474,7 +470,6 @@ class Compute_S_D:
         """
         batch_size = s.size(0)
         sum_s = sum(s, dim=tuple(range(s.ndim - 1)))
-        print('sum_s:', sum_s.size())
         return einsum('i,i->i', sum_s, sum_s) / batch_size
 
 class AdaFisherBackBone(Optimizer):
@@ -585,7 +580,7 @@ class AdaFisherBackBone(Optimizer):
         if is_grad_enabled() and self.steps % self.TCov == 0:
             H_bar_D_i = self.Compute_H_bar_D(input[0].data, module)
             if self.steps == 0:
-                self.H_bar_D[module] = H_bar_D_i.new(H_bar_D_i.size(0)).fill_(1)
+                self.H_bar_D[module] = H_bar_D_i.new(H_bar_D_i.size()).fill_(1)
             update_running_avg(MinMaxNormalization(H_bar_D_i), self.H_bar_D[module], self.gammas)
             
 
@@ -623,7 +618,7 @@ class AdaFisherBackBone(Optimizer):
         if self.steps % self.TCov == 0:
             S_D_i = self.Compute_S_D(grad_output[0].data, module)
             if self.steps == 0:
-                self.S_D[module] = S_D_i.new(S_D_i.size(0)).fill_(1)
+                self.S_D[module] = S_D_i.new(S_D_i.size()).fill_(1)
             update_running_avg(MinMaxNormalization(S_D_i), self.S_D[module], self.gammas)
 
     def _prepare_model(self):
@@ -657,7 +652,6 @@ class AdaFisherBackBone(Optimizer):
         for module in self.model.modules():
             classname = module.__class__.__name__
             if classname in self.SUPPORTED_MODULES:
-                print(module)
                 if isinstance(module, sb_Conv2d) or isinstance(module, sb_Linear) or isinstance(module, sb_LayerNorm):
                     continue
                 self.modules.append(module)
@@ -665,8 +659,6 @@ class AdaFisherBackBone(Optimizer):
                 module.register_full_backward_hook(self._save_grad_output)
             else:
                 pass
-                # print(f"classname {classname} not in SUPPORTED MODULES")
-        # print('modules:', self.modules)
     
     def aggregate_kronecker_factors(self, module: Module):
         """
@@ -714,27 +706,18 @@ class AdaFisherBackBone(Optimizer):
         computed Fisher Information and is a key component of the AdaFisher optimizer's strategy
         to leverage curvature information for more efficient and effective optimization.
         """
-        print('F_tilde called')
-        print('before:', type(module))
         if isinstance(module, sb_Conv2d):
             module = module.conv
-            print('weights:', module.weight.data.size())
-            print('biass:', module.bias.data.size())
         if isinstance(module, sb_Linear):
             module = module.w
         if isinstance(module, sb_LayerNorm):
             module = module.norm
-        print('after:', type(module))
-
-
         # Fisher Computation
         if self.dist:
             self.aggregate_kronecker_factors(module = module)
-        F_tilde = kron(self.H_bar_D[module].unsqueeze(1), self.S_D[module].unsqueeze(0)).t() + self.Lambda
+        F_tilde = kron(self.H_bar_D[module].unsqueeze(1), self.S_D[module].unsqueeze(0)).t() + self.Lambda if self.H_bar_D[module].ndim == 1 \
+                  else kron(self.H_bar_D[module], self.S_D[module].unsqueeze(-1))
         if module.bias is not None:
-            print("module.weight.grad.data.size():", module.weight.grad.data.size())
-            print("module.bias.grad.data.size():", module.bias.grad.data.size())
-            print("F_tilde:", F_tilde.size())
             F_tilde = [F_tilde[:, :-1], F_tilde[:, -1:]]
             F_tilde[0] = F_tilde[0].view(*module.weight.grad.data.size())
             F_tilde[1] = F_tilde[1].view(*module.bias.grad.data.size())
@@ -759,7 +742,6 @@ class AdaFisherBackBone(Optimizer):
         """
         params = param[idx_param]
         module = self.modules[idx_module]
-        # print(type(module))
         if isinstance(module, sb_Conv2d):
             module = module.conv
         if isinstance(module, sb_Linear):
@@ -823,7 +805,6 @@ class AdaFisher(AdaFisherBackBone):
                                         TCov = TCov,
                                         dist = dist,
                                         weight_decay = weight_decay)
-        # print(model)
         
     @no_grad()
     def _step(self, hyperparameters: Dict[str, float], param: Parameter, F_tilde: Tensor):
@@ -876,8 +857,6 @@ class AdaFisher(AdaFisherBackBone):
         exp_avg.mul_(beta).add_(grad, alpha=1 - beta)
         step_size = hyperparameters['lr'] / bias_correction1
         # Update Rule
-        print('exp_avg.size():', exp_avg.size())
-        print('F_tilde.size():', F_tilde.size())
         param.addcdiv_(exp_avg, F_tilde, value=-step_size)
 
     @no_grad()
@@ -905,35 +884,7 @@ class AdaFisher(AdaFisherBackBone):
         """
         if closure is not None:
             raise NotImplementedError("Closure not supported.")
-
-        for module in self.modules:
-            print(module)
-        for module in self.modules:
-            if isinstance(module, sb_Conv2d):
-                module = module.conv
-            if isinstance(module, sb_Linear):
-                module = module.w
-            if isinstance(module, sb_LayerNorm):
-                module = module.norm
-            # print('module:', module)
-            # print('type(module)', type(module)) 
-            print('module.weight.size()', module.weight.size()) 
-            if module.bias is not None:    
-                print('module.bias.size()', module.bias.size())    
-
-        for group in self.param_groups:
-            # if isinstance(module, sb_Conv2d):
-            #     module = module.conv
-            # if isinstance(module, sb_Linear):
-            #     module = module.w
-            # if isinstance(module, sb_LayerNorm):
-            #     module = module.norm
-            # print("group['params']:", group['params'])
-            # print("group['params'].size():", group['params'].size())
-            for g in group['params']:
-                print("g.size():", g.size())
-                # pass
-
+        
         for group in self.param_groups:
             idx_param, idx_module, buffer_count = 0, 0, 0
             param = group['params']
@@ -960,14 +911,7 @@ class AdaFisher(AdaFisherBackBone):
                 else:
                     F_tilde = ones_like(param[idx_param]) 
                 if isinstance(F_tilde, list):
-                    print(f'F_tilde[0]: {F_tilde[0].size()}')
-                    print(f'F_tilde[1]: {F_tilde[1].size()}')
                     for F_tilde_i in F_tilde:
-                        print('inside step:', type(m))
-                        print(f'param[{idx_param-1}]:', param[idx_param-1].size())
-                        print(f'param[{idx_param}]:', param[idx_param].size())
-                        print(f'param[{idx_param+1}]:', param[idx_param+1].size())
-                        print(f'F_tilde_i:', F_tilde_i.size())
                         self._step(hyperparameters, param[idx_param], F_tilde_i)
                         idx_param += 1
                 else:
