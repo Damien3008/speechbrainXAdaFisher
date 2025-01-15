@@ -721,8 +721,10 @@ class AdaFisherBackBone(Optimizer):
             F_tilde = [F_tilde[:, :-1], F_tilde[:, -1:]]
             F_tilde[0] = F_tilde[0].view(*module.weight.grad.data.size())
             F_tilde[1] = F_tilde[1].view(*module.bias.grad.data.size())
+            #print(f"Layer: {module} | Weights: {F_tilde}")
             return F_tilde
         else:
+            #print(f"Layer: {module} | Weights: {F_tilde}")
             return F_tilde.reshape(module.weight.grad.data.size())
 
     def _check_dim(self, param: List[Parameter], idx_module: int, idx_param: int) -> bool:
@@ -851,13 +853,14 @@ class AdaFisher(AdaFisherBackBone):
         beta = hyperparameters['beta']
         state['step'] += 1
         bias_correction1 = 1 - beta ** state['step']
-        if hyperparameters['weight_decay'] != 0:
-            grad = grad.add(param, alpha=hyperparameters['weight_decay'])
+        # if hyperparameters['weight_decay'] != 0:
+        #     grad = grad.add(param, alpha=hyperparameters['weight_decay'])
         # Decay the first and second moment running average coefficient
         exp_avg.mul_(beta).add_(grad, alpha=1 - beta)
-        step_size = hyperparameters['lr'] / bias_correction1
-        # Update Rule
-        param.addcdiv_(exp_avg, F_tilde, value=-step_size)
+        param.data -= hyperparameters['lr'] * (exp_avg / bias_correction1 / F_tilde + hyperparameters['weight_decay'] * param.data)
+        # step_size = hyperparameters['lr'] / bias_correction1
+        # # Update Rule
+        # param.addcdiv_(exp_avg, F_tilde, value=-step_size)
 
     @no_grad()
     def step(self, closure: Union[None, Callable[[], Tensor]] = None):
@@ -1044,10 +1047,15 @@ class AdaFisherW(AdaFisherBackBone):
         """
         if closure is not None:
             raise NotImplementedError("Closure not supported.")
-
+        
         for group in self.param_groups:
             idx_param, idx_module, buffer_count = 0, 0, 0
-            param, hyperparameters = group['params'], {"weight_decay": group['weight_decay'], "beta": group['beta'], "lr": group['lr']}
+            param = group['params']
+            hyperparameters = {
+                "weight_decay": group['weight_decay'],
+                "beta": group['beta'], 
+                "lr": group['lr']
+            }
             for _ in range(len(self.modules)):
                 if param[idx_param].grad is None:
                     idx_param += 1
@@ -1064,7 +1072,7 @@ class AdaFisherW(AdaFisherBackBone):
                     F_tilde = self._get_F_tilde(m)
                     idx_module += 1
                 else:
-                    F_tilde = ones_like(param[idx_param])
+                    F_tilde = ones_like(param[idx_param]) 
                 if isinstance(F_tilde, list):
                     for F_tilde_i in F_tilde:
                         self._step(hyperparameters, param[idx_param], F_tilde_i)
