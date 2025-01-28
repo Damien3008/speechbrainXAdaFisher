@@ -150,7 +150,7 @@ def update_running_avg(new: Tensor, current: Tensor, gammas: list):
     - This function modifies the `current` dictionary in-place, so it does not return anything.
     Ensure that this behavior is intended in your use case.
     """
-    current *= (1 - gammas[0])
+    current *= (1-gammas[0])
     current += new * gammas[1]
 
 
@@ -289,8 +289,8 @@ class Compute_H_bar_D:
         h = h.reshape(-1, h.size(-1))
         if layer.bias is not None:
             h_bar = cat([h, h.new(h.size(0), 1).fill_(1)], 1)
-        return einsum('ij,ij->j', h_bar, h_bar) / (batch_size * spatial_size) if layer.bias is not None \
-            else einsum('ij,ij->j', h, h) / (batch_size * spatial_size)
+        return einsum('ij,ij->j', h_bar, h_bar) / batch_size if layer.bias is not None \
+            else einsum('ij,ij->j', h, h) / batch_size
 
     @staticmethod
     def linear(h: Tensor, layer: Linear) -> Tensor:
@@ -421,7 +421,7 @@ class Compute_S_D:
         spatial_size = s.size(2) * s.size(3)
         s = s.transpose(1, 2).transpose(2, 3)
         s = s.reshape(-1, s.size(-1))
-        return einsum('ij,ij->j', s, s) / (batch_size * spatial_size)
+        return einsum('ij,ij->j', s, s) * spatial_size
 
     @staticmethod
     def linear(s: Tensor, layer: Linear) -> Tensor:
@@ -438,7 +438,7 @@ class Compute_S_D:
         if len(s.shape) > 2:
             s = s.reshape(-1, s.shape[-1])
         batch_size = s.size(0)
-        return einsum('ij,ij->j', s, s) / batch_size
+        return einsum('ij,ij->j', s, s) * batch_size
 
     @staticmethod
     def batchnorm2d(s: Tensor, layer: BatchNorm2d) -> Tensor:
@@ -505,7 +505,7 @@ class AdaFisherBackBone(Optimizer):
         ValueError: If any of the parameters are out of their expected ranges.
     """ 
     
-    SUPPORTED_MODULES: Tuple[Type[str], ...] = ("Linear", "Conv2d", "BatchNorm2d", "LayerNorm")
+    SUPPORTED_MODULES: Tuple[Type[str], ...] = ("Linear", "Conv2d", "BatchNorm2d")#, "LayerNorm")
 
     def __init__(self,
                  model: Module,
@@ -581,7 +581,8 @@ class AdaFisherBackBone(Optimizer):
             H_bar_D_i = self.Compute_H_bar_D(input[0].data, module)
             if self.steps == 0:
                 self.H_bar_D[module] = H_bar_D_i.new(H_bar_D_i.size()).fill_(1)
-            update_running_avg(MinMaxNormalization(H_bar_D_i), self.H_bar_D[module], self.gammas)
+            #update_running_avg(MinMaxNormalization(H_bar_D_i), self.H_bar_D[module], self.gammas)
+            update_running_avg(H_bar_D_i, self.H_bar_D[module], self.gammas)
             
 
     def _save_grad_output(self, module: Module, grad_input: Tensor, grad_output: Tensor):
@@ -619,7 +620,8 @@ class AdaFisherBackBone(Optimizer):
             S_D_i = self.Compute_S_D(grad_output[0].data, module)
             if self.steps == 0:
                 self.S_D[module] = S_D_i.new(S_D_i.size()).fill_(1)
-            update_running_avg(MinMaxNormalization(S_D_i), self.S_D[module], self.gammas)
+            #update_running_avg(MinMaxNormalization(S_D_i), self.S_D[module], self.gammas)
+            update_running_avg(S_D_i, self.S_D[module], self.gammas)
 
     def _prepare_model(self):
         """
